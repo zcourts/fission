@@ -921,13 +921,6 @@ fn aligned_offset(extra_width: f64, extra_height: f64, alignment: ImageAlignment
     (x, y)
 }
 
-fn image_fit_requires_clip(fit: fission_render::ImageFit) -> bool {
-    matches!(
-        fit,
-        fission_render::ImageFit::Cover | fission_render::ImageFit::None
-    )
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 fn spawn_image_load(key: String, request: ImageRequest) {
     std::thread::spawn(move || {
@@ -1032,14 +1025,6 @@ mod image_tests {
     use std::io::Cursor;
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn contained_and_filled_images_do_not_require_a_clip_layer() {
-        assert!(!image_fit_requires_clip(fission_render::ImageFit::Contain));
-        assert!(!image_fit_requires_clip(fission_render::ImageFit::Fill));
-        assert!(image_fit_requires_clip(fission_render::ImageFit::Cover));
-        assert!(image_fit_requires_clip(fission_render::ImageFit::None));
-    }
 
     fn tiny_png() -> Vec<u8> {
         let image = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
@@ -3501,19 +3486,15 @@ impl<'a> VelloRenderer<'a> {
                             image: &*image_data,
                             sampler: ImageSampler::default(),
                         };
-                        if image_fit_requires_clip(*fit) {
-                            let clip_rect = Rect::new(
-                                rect.origin.x as f64,
-                                rect.origin.y as f64,
-                                (rect.origin.x + rect.size.width) as f64,
-                                (rect.origin.y + rect.size.height) as f64,
-                            );
-                            self.with_clip_rect(clip_rect, |this| {
-                                this.scene.draw_image(brush, transform);
-                            });
-                        } else {
-                            self.scene.draw_image(brush, transform);
-                        }
+                        let clip_rect = Rect::new(
+                            rect.origin.x as f64,
+                            rect.origin.y as f64,
+                            (rect.origin.x + rect.size.width) as f64,
+                            (rect.origin.y + rect.size.height) as f64,
+                        );
+                        self.with_clip_rect(clip_rect, |this| {
+                            this.scene.draw_image(brush, transform);
+                        });
                     }
                 }
                 DisplayOp::DrawPath {
