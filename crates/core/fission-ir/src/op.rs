@@ -466,6 +466,14 @@ pub enum LayoutOp {
         anchor: WidgetId,
         content: WidgetId,
     },
+    /// Lays out five overlay children around an external anchor.
+    ///
+    /// Children are ordered as top, bottom, left, right, and focus ring. The
+    /// four surrounding regions leave the padded anchor rectangle uncovered.
+    Spotlight {
+        anchor: WidgetId,
+        padding: LayoutUnit,
+    },
     Transform {
         transform: [f32; 16],
     },
@@ -632,6 +640,11 @@ impl std::hash::Hash for LayoutOp {
             Self::Clip { path } => {
                 12.hash(state);
                 path.hash(state);
+            }
+            Self::Spotlight { anchor, padding } => {
+                13.hash(state);
+                anchor.hash(state);
+                hash_unit(*padding, state);
             }
         }
     }
