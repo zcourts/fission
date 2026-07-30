@@ -3,8 +3,8 @@ use crate::document::{
 };
 use crate::front_matter::split_front_matter;
 use crate::html::{
-    render_ir_to_html_with_styles, theme_variables_css, CodeHighlightingOptions, CssVariableMap,
-    HtmlRenderOptions, StyleRegistry,
+    render_ir_to_html_with_styles, stable_hash, theme_variables_css, CodeHighlightingOptions,
+    CssVariableMap, HtmlRenderOptions, StyleRegistry,
 };
 use crate::search::{write_search_index, SiteSearchOptions};
 use crate::site::{
@@ -28,6 +28,7 @@ use std::path::{Path, PathBuf};
 const SITE_CSS: &str = include_str!("../assets/site.css");
 const SITE_ENHANCEMENT_JS: &str = include_str!("../assets/site-enhancement.js");
 const SEARCH_JS: &str = include_str!("../assets/search.js");
+const ASSET_REVISION_PLACEHOLDER: &str = "__FISSION_ASSET_REVISION__";
 
 pub fn site_base_css() -> &'static str {
     SITE_CSS
@@ -246,8 +247,10 @@ pub fn build_site(options: &SiteBuildOptions, site: &FissionSite) -> Result<Site
         let html = render_route(route, &routes, options, site, &mut styles)?;
         rendered_routes.push((route, html));
     }
-    write_site_css(options, site, &styles)?;
+    let site_css = render_site_css(options, site, &styles);
+    write_site_css(options, &site_css)?;
     write_site_enhancement_js(options)?;
+    let asset_revision = site_asset_revision(&site_css);
 
     let mut report_routes = Vec::new();
     for (route, html) in rendered_routes {
@@ -255,8 +258,11 @@ pub fn build_site(options: &SiteBuildOptions, site: &FissionSite) -> Result<Site
         if let Some(parent) = output.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&output, html)
-            .with_context(|| format!("failed to write {}", output.display()))?;
+        fs::write(
+            &output,
+            html.replace(ASSET_REVISION_PLACEHOLDER, &asset_revision),
+        )
+        .with_context(|| format!("failed to write {}", output.display()))?;
         report_routes.push(SiteRouteReport {
             path: route.path.clone(),
             title: route.title.clone(),
@@ -342,11 +348,11 @@ fn prepare_output_dir(options: &SiteBuildOptions) -> Result<()> {
     })
 }
 
-fn write_site_css(
+fn render_site_css(
     options: &SiteBuildOptions,
     site: &FissionSite,
     styles: &StyleRegistry,
-) -> Result<()> {
+) -> String {
     let mut css = String::new();
     css.push_str(SITE_CSS);
     css.push('\n');
@@ -358,12 +364,24 @@ fn write_site_css(
         css.push_str(user_css);
         css.push('\n');
     }
+    css
+}
+
+fn write_site_css(options: &SiteBuildOptions, css: &str) -> Result<()> {
     fs::write(options.output_dir.join("site.css"), css).with_context(|| {
         format!(
             "failed to write {}",
             options.output_dir.join("site.css").display()
         )
     })
+}
+
+fn site_asset_revision(css: &str) -> String {
+    let mut content = String::with_capacity(css.len() + SITE_ENHANCEMENT_JS.len() + 32);
+    content.push_str("fission.static.global-assets.v1\n");
+    content.push_str(css);
+    content.push_str(SITE_ENHANCEMENT_JS);
+    format!("{:016x}", stable_hash(content.as_bytes()))
 }
 
 fn write_site_enhancement_js(options: &SiteBuildOptions) -> Result<()> {
@@ -1249,11 +1267,12 @@ fn stylesheet_href_for_route(route_path: &str) -> String {
         .split('/')
         .filter(|segment| !segment.is_empty())
         .count();
-    if depth == 0 {
+    let href = if depth == 0 {
         "site.css".to_string()
     } else {
         format!("{}site.css", "../".repeat(depth))
-    }
+    };
+    format!("{href}?v={ASSET_REVISION_PLACEHOLDER}")
 }
 
 fn search_script_href_for_route(route_path: &str, search_path: &str) -> String {
@@ -1831,7 +1850,15 @@ mod tests {
         assert!(html.contains("class=\"language-fission-tabs-start\""));
         assert!(html.contains("Rust tab"));
         assert!(html.contains("Site tab"));
-        assert!(html.contains("site-enhancement.js"));
+        assert!(html.contains("site.css?v="));
+        assert!(html.contains("site-enhancement.js?v="));
+        assert!(!html.contains(ASSET_REVISION_PLACEHOLDER));
+        let stylesheet_revision = html
+            .split("site.css?v=")
+            .nth(1)
+            .and_then(|value| value.split('"').next())
+            .unwrap();
+        assert!(html.contains(&format!("site-enhancement.js?v={stylesheet_revision}")));
         assert!(html.contains("highlight.js/11.11.1/highlight.min.js"));
         assert!(html.contains("fission-site-nav-item"));
         assert!(html.contains("fission-site-nav-menu"));

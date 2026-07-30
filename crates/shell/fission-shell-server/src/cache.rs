@@ -93,6 +93,14 @@ impl CacheMetadata {
             source: "fission-shell-server".to_string(),
         }
     }
+
+    pub fn public_asset(path: impl Into<String>, content_type: impl Into<String>) -> Self {
+        Self {
+            route_path: path.into(),
+            content_type: content_type.into(),
+            source: "fission-shell-server".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -158,6 +166,27 @@ impl CacheEntry {
         }
     }
 
+    pub fn public_fragment(
+        key: CacheKey,
+        value: String,
+        ttl: Duration,
+        metadata: CacheMetadata,
+    ) -> Self {
+        let created_at = SystemTime::now();
+        Self {
+            key,
+            content_hash: stable_hash(value.as_bytes()),
+            value: CacheValue::Fragment(value),
+            scope: CacheScope::Public,
+            created_at,
+            fresh_until: created_at + ttl,
+            stale_until: None,
+            tags: Vec::new(),
+            vary: Vec::new(),
+            metadata,
+        }
+    }
+
     pub fn freshness(&self, now: SystemTime) -> Freshness {
         if now <= self.fresh_until {
             Freshness::Fresh
@@ -174,6 +203,13 @@ impl CacheEntry {
     pub fn rendered_page(&self) -> Option<&RenderedPage> {
         match &self.value {
             CacheValue::FullPage(page) => Some(page),
+            _ => None,
+        }
+    }
+
+    pub fn fragment(&self) -> Option<&str> {
+        match &self.value {
+            CacheValue::Fragment(value) => Some(value),
             _ => None,
         }
     }
@@ -584,6 +620,20 @@ mod tests {
             entry.freshness(entry.fresh_until + Duration::from_millis(100)),
             Freshness::Expired
         );
+    }
+
+    #[test]
+    fn public_fragment_round_trips_text_assets() {
+        let entry = CacheEntry::public_fragment(
+            CacheKey::new("asset:styles"),
+            ".example{display:block}".to_string(),
+            Duration::from_secs(60),
+            CacheMetadata::public_asset("/styles.css", "text/css; charset=utf-8"),
+        );
+
+        assert_eq!(entry.fragment(), Some(".example{display:block}"));
+        assert_eq!(entry.scope, CacheScope::Public);
+        assert_eq!(entry.metadata.route_path, "/styles.css");
     }
 
     #[test]
