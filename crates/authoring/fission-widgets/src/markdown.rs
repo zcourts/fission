@@ -86,13 +86,90 @@ impl From<MarkdownViewer> for Widget {
 
 fn render_markdown_content(markdown: &str) -> Widget {
     let (_, view) = fission_core::build::current::<()>();
-    let parser = Parser::with_extensions(
-        parser::Options::default(),
-        parser::gfm(parser::GfmOptions::default()),
-    );
+    let gfm_options = parser::GfmOptions {
+        linkify: parser::LinkifyOptions {
+            email_scanner: Box::new(scan_markdown_email),
+            ..Default::default()
+        },
+    };
+    let parser = Parser::with_extensions(parser::Options::default(), parser::gfm(gfm_options));
     let mut reader = BasicReader::new(markdown);
     let (arena, document_ref) = parser.parse(&mut reader);
     MarkdownRenderer::new(markdown, &arena, view).document(document_ref)
+}
+
+fn scan_markdown_email(input: &[u8]) -> Option<usize> {
+    let mut cursor = 0;
+    while input
+        .get(cursor)
+        .copied()
+        .is_some_and(is_markdown_email_local_byte)
+    {
+        cursor += 1;
+    }
+    if cursor == 0 || input.get(cursor) != Some(&b'@') {
+        return None;
+    }
+    cursor += 1;
+
+    let mut last_complete_domain = None;
+    loop {
+        let label_start = cursor;
+        if !input
+            .get(cursor)
+            .copied()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        {
+            break;
+        }
+        cursor += 1;
+        while cursor - label_start < 63
+            && input
+                .get(cursor)
+                .copied()
+                .is_some_and(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            cursor += 1;
+        }
+        while cursor > label_start && input[cursor - 1] == b'-' {
+            cursor -= 1;
+        }
+        if cursor == label_start {
+            break;
+        }
+        last_complete_domain = Some(cursor);
+        if input.get(cursor) != Some(&b'.') {
+            break;
+        }
+        cursor += 1;
+    }
+    last_complete_domain
+}
+
+fn is_markdown_email_local_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'.' | b'!'
+                | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'/'
+                | b'='
+                | b'?'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'{'
+                | b'|'
+                | b'}'
+                | b'~'
+                | b'-'
+        )
 }
 
 #[derive(Clone, Copy)]

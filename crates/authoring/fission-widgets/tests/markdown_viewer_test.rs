@@ -136,6 +136,51 @@ fn disables_unsafe_link_schemes_without_hiding_link_text() {
 }
 
 #[test]
+fn explicit_mailto_links_take_precedence_over_gfm_email_autolinks() {
+    let node = build_markdown_content(
+        "Email [support@example.com](mailto:support@example.com?subject=Help). \
+         Plain addresses such as help@example.com remain automatic links.",
+    );
+    let column = fission_core::internal::widget_as_column(&node)
+        .expect("expected MarkdownContent to render a Column");
+    let paragraph = fission_core::internal::widget_as_rich_text(&column.children[0])
+        .expect("expected paragraph to render as RichText");
+
+    let mailto = paragraph
+        .runs
+        .iter()
+        .find(|run| run.text == "support@example.com")
+        .expect("explicit mailto link text");
+    assert!(mailto.style.underline);
+    assert!(
+        paragraph
+            .runs
+            .iter()
+            .all(|run| !run.text.contains("](mailto:")),
+        "explicit mailto link syntax must not leak into rendered text",
+    );
+    let automatic = paragraph
+        .runs
+        .iter()
+        .find(|run| run.text == "help@example.com")
+        .expect("automatic GFM email link text");
+    assert!(automatic.style.underline);
+
+    for destination in [
+        "markdown-link:mailto:support@example.com?subject=Help",
+        "markdown-link:mailto:help@example.com",
+    ] {
+        assert!(
+            paragraph
+                .annotations
+                .iter()
+                .any(|annotation| annotation.semantics_identifier.as_deref() == Some(destination)),
+            "missing rich-text link annotation for {destination}",
+        );
+    }
+}
+
+#[test]
 fn disables_unsafe_link_wrappers_around_images() {
     let node = build_markdown_content(
         "[![Screenshot](https://cdn.example.com/image.png)](javascript:alert(1))\n",
