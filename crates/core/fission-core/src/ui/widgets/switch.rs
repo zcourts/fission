@@ -29,6 +29,9 @@ pub struct Switch {
     /// Stable identifier exposed on the switch's interactive semantics node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantics_identifier: Option<String>,
+    /// Accessible name exposed on the switch's interactive semantics node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics_label: Option<String>,
     /// Current on/off state.
     pub checked: bool,
     /// Action dispatched when the switch is tapped.
@@ -39,6 +42,12 @@ impl Switch {
     /// Sets the stable identifier exposed to accessibility and test tooling.
     pub fn semantics_identifier(mut self, identifier: impl Into<String>) -> Self {
         self.semantics_identifier = Some(identifier.into());
+        self
+    }
+
+    /// Sets the accessible name exposed to accessibility and test tooling.
+    pub fn semantics_label(mut self, label: impl Into<String>) -> Self {
+        self.semantics_label = Some(label.into());
         self
     }
 }
@@ -157,7 +166,7 @@ impl InternalLower for Switch {
 
         let mut semantics = fission_ir::Semantics {
             role: fission_ir::Role::Switch,
-            label: None,
+            label: self.semantics_label.clone(),
             identifier: self.semantics_identifier.clone(),
             value: Some(if self.checked {
                 "true".into()

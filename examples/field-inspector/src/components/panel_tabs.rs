@@ -60,6 +60,7 @@ impl From<InspectorPanelTabs> for Widget {
         }
 
         PanelCard::new(SegmentedControl {
+            semantics_identifier: Some("field-inspector-panel".into()),
             options: PANELS
                 .iter()
                 .map(|panel| panel.label().to_string())

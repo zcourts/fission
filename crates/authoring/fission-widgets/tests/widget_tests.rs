@@ -39,7 +39,8 @@ fn test_checkbox_lowering() {
         checked: true,
         ..Default::default()
     }
-    .semantics_identifier("settings.enabled");
+    .semantics_identifier("settings.enabled")
+    .semantics_label("Enable settings");
 
     let env = Env::default();
     let runtime = RuntimeState::default();
@@ -50,6 +51,7 @@ fn test_checkbox_lowering() {
     if let Op::Semantics(s) = &node.op {
         assert_eq!(s.role, Role::Checkbox);
         assert_eq!(s.identifier.as_deref(), Some("settings.enabled"));
+        assert_eq!(s.label.as_deref(), Some("Enable settings"));
         assert_eq!(s.checked, Some(true));
     } else {
         panic!("Checkbox should lower to Semantics root");
@@ -97,7 +99,8 @@ fn test_switch_lowering_preserves_semantics_identifier() {
         checked: true,
         ..Default::default()
     }
-    .semantics_identifier("settings.dark_mode");
+    .semantics_identifier("settings.dark_mode")
+    .semantics_label("Dark mode");
 
     let env = Env::default();
     let runtime = RuntimeState::default();
@@ -108,6 +111,7 @@ fn test_switch_lowering_preserves_semantics_identifier() {
     if let Op::Semantics(s) = &node.op {
         assert_eq!(s.role, Role::Switch);
         assert_eq!(s.identifier.as_deref(), Some("settings.dark_mode"));
+        assert_eq!(s.label.as_deref(), Some("Dark mode"));
         assert_eq!(s.checked, Some(true));
         assert!(s.focusable);
     } else {

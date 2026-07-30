@@ -92,6 +92,8 @@ impl From<OverlaySection> for Widget {
             },
             Select {
                 id: WidgetId::explicit("gallery_select"),
+                semantics_identifier: Some("gallery.select".into()),
+                semantics_label: Some("Gallery option".into()),
                 selected_label: state.select_value.clone(),
                 items: vec![
                     SelectItem {

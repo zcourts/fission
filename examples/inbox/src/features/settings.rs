@@ -374,6 +374,7 @@ impl From<SettingsModal> for Widget {
                                 .size(14.0)
                                 .into(),
                             SegmentedControl {
+                                semantics_identifier: Some("settings-language".into()),
                                 options: vec![t("settings.lang_en"), t("settings.lang_es")],
                                 selected_index: if view.state().locale.0 == "es-ES" {
                                     1

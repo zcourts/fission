@@ -89,6 +89,7 @@ impl From<NavigationSection> for Widget {
                     ],
                 },
                 SegmentedControl {
+                    semantics_identifier: Some("gallery-segmented".into()),
                     options: vec!["Day".into(), "Week".into(), "Month".into()],
                     selected_index: state.segmented_index,
                     on_change: Some(segmented_change),
@@ -101,6 +102,7 @@ impl From<NavigationSection> for Widget {
                 Link {
                     text: "Visit documentation".into(),
                     on_click: None,
+                    semantics_identifier: Some("gallery-documentation".into()),
                 },
                 MenuButton {
                     id: WidgetId::explicit("gallery_menu"),

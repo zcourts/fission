@@ -1,7 +1,7 @@
 use crate::stack::HStack;
 use crate::{flyout, Icon, Menu, MenuItem};
 use fission_core::ui::{Button, ButtonContentAlign, ButtonVariant, Text, Widget};
-use fission_core::{ActionEnvelope, WidgetId};
+use fission_core::{ActionEnvelope, Role, Semantics, WidgetId};
 use fission_icons::material;
 use serde::{Deserialize, Serialize};
 
@@ -38,6 +38,12 @@ pub struct SelectItem {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Select {
     pub id: WidgetId,
+    /// Stable identifier exposed by the trigger to accessibility and LiveTest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics_identifier: Option<String>,
+    /// Accessible name for the selector. The displayed selection is used when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics_label: Option<String>,
     pub selected_label: Option<String>,
     pub items: Vec<SelectItem>,
     pub is_open: bool,
@@ -50,6 +56,8 @@ impl Default for Select {
     fn default() -> Self {
         Self {
             id: WidgetId::explicit("select"),
+            semantics_identifier: None,
+            semantics_label: None,
             selected_label: None,
             items: Vec::new(),
             is_open: false,
@@ -57,6 +65,20 @@ impl Default for Select {
             placeholder: "Select...".into(),
             width: Some(200.0),
         }
+    }
+}
+
+impl Select {
+    /// Sets the stable identifier exposed by the selector trigger.
+    pub fn semantics_identifier(mut self, identifier: impl Into<String>) -> Self {
+        self.semantics_identifier = Some(identifier.into());
+        self
+    }
+
+    /// Sets the accessible name exposed by the selector trigger.
+    pub fn semantics_label(mut self, label: impl Into<String>) -> Self {
+        self.semantics_label = Some(label.into());
+        self
     }
 }
 
@@ -106,6 +128,13 @@ impl From<Select> for Widget {
             content_align: ButtonContentAlign::Start,
             child: Some(trigger_content),
             on_press: this.on_toggle.clone(),
+            semantics: Some(select_trigger_semantics(
+                this.semantics_identifier.clone(),
+                this.semantics_label
+                    .clone()
+                    .unwrap_or_else(|| display_label.to_string()),
+                this.selected_label.clone(),
+            )),
             width: this.width,
             ..Default::default()
         }
@@ -138,5 +167,39 @@ impl From<Select> for Widget {
         }
 
         trigger
+    }
+}
+
+fn select_trigger_semantics(
+    identifier: Option<String>,
+    label: String,
+    value: Option<String>,
+) -> Semantics {
+    Semantics {
+        role: Role::Button,
+        label: Some(label),
+        identifier,
+        value,
+        focusable: true,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::select_trigger_semantics;
+
+    #[test]
+    fn trigger_semantics_preserve_control_name_identifier_and_selected_value() {
+        let semantics = select_trigger_semantics(
+            Some("settings.language".into()),
+            "Language".into(),
+            Some("English".into()),
+        );
+
+        assert_eq!(semantics.identifier.as_deref(), Some("settings.language"));
+        assert_eq!(semantics.label.as_deref(), Some("Language"));
+        assert_eq!(semantics.value.as_deref(), Some("English"));
+        assert!(semantics.focusable);
     }
 }

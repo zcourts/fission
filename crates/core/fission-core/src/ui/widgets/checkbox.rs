@@ -31,6 +31,9 @@ pub struct Checkbox {
     /// Stable identifier exposed on the checkbox's interactive semantics node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub semantics_identifier: Option<String>,
+    /// Accessible name exposed without requiring a visible text label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics_label: Option<String>,
     /// Current checked state.
     pub checked: bool,
     /// Action dispatched when the checkbox is tapped.
@@ -43,6 +46,12 @@ impl Checkbox {
     /// Sets the stable identifier exposed to accessibility and test tooling.
     pub fn semantics_identifier(mut self, identifier: impl Into<String>) -> Self {
         self.semantics_identifier = Some(identifier.into());
+        self
+    }
+
+    /// Sets the accessible name exposed to accessibility and test tooling.
+    pub fn semantics_label(mut self, label: impl Into<String>) -> Self {
+        self.semantics_label = Some(label.into());
         self
     }
 }
@@ -206,7 +215,7 @@ impl InternalLower for Checkbox {
 
         let mut semantics = fission_ir::Semantics {
             role: fission_ir::Role::Checkbox,
-            label: self.label.clone(),
+            label: self.semantics_label.clone().or_else(|| self.label.clone()),
             identifier: self.semantics_identifier.clone(),
             value: Some(if self.checked {
                 "true".into()

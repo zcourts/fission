@@ -277,6 +277,7 @@ impl From<EmailList> for Widget {
                 spacing: Some(8.0),
                 children: vec![
                     SegmentedControl {
+                        semantics_identifier: Some("inbox-filter".into()),
                         options: vec!["All".into(), "Unread".into(), "Starred".into()],
                         selected_index: view.state().filter_mode,
                         on_change: Some(Arc::new(move |idx| ActionEnvelope {

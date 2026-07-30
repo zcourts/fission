@@ -256,6 +256,7 @@ impl From<AllWidgets> for Widget {
                 Link {
                     text: "Click me".into(),
                     on_click: None,
+                    semantics_identifier: Some("audit-link".into()),
                 }
                 .into(),
             ],
@@ -347,6 +348,8 @@ impl From<AllWidgets> for Widget {
                 .into(),
                 Select {
                     id: WidgetId::explicit("sel"),
+                    semantics_identifier: Some("gallery.audit.select".into()),
+                    semantics_label: Some("Audit option".into()),
                     selected_label: Some("Opt A".into()),
                     items: vec![],
                     is_open: false,

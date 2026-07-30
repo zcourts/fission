@@ -1,6 +1,6 @@
 use crate::stack::HStack;
 use fission_core::ui::{Button, ButtonVariant, Container, Text, Widget};
-use fission_core::ActionEnvelope;
+use fission_core::{ActionEnvelope, Role, Semantics};
 use std::sync::Arc;
 
 /// A horizontal row of toggle buttons where exactly one option is active.
@@ -15,6 +15,8 @@ use std::sync::Arc;
 /// * `selected_index` - Index of the currently active segment.
 /// * `on_change` - Closure that produces an action for the newly selected index.
 pub struct SegmentedControl {
+    /// Stable prefix used for each option's accessibility and LiveTest identifier.
+    pub semantics_identifier: Option<String>,
     pub options: Vec<String>,
     pub selected_index: usize,
     pub on_change: Option<Arc<dyn Fn(usize) -> ActionEnvelope + Send + Sync>>,
@@ -62,6 +64,12 @@ impl From<SegmentedControl> for Widget {
                 height: Some(40.0),
                 padding: Some([12.0, 12.0, 0.0, 0.0]),
                 on_press: cb.map(|f| f(i)),
+                semantics: Some(segmented_option_semantics(
+                    this.semantics_identifier.as_deref(),
+                    i,
+                    opt,
+                    is_selected,
+                )),
                 ..Default::default()
             }
             .into();
@@ -78,5 +86,41 @@ impl From<SegmentedControl> for Widget {
         .border(theme.border_color, 1.0)
         .border_radius(theme.radius)
         .into()
+    }
+}
+
+fn segmented_option_semantics(
+    identifier_prefix: Option<&str>,
+    index: usize,
+    label: &str,
+    selected: bool,
+) -> Semantics {
+    Semantics {
+        role: Role::Radio,
+        label: Some(label.into()),
+        identifier: identifier_prefix.map(|prefix| format!("{prefix}-option-{index}")),
+        checked: Some(selected),
+        focusable: true,
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::segmented_option_semantics;
+    use fission_core::Role;
+
+    #[test]
+    fn options_expose_stable_radio_semantics() {
+        let semantics = segmented_option_semantics(Some("settings-theme"), 2, "Dark", true);
+
+        assert_eq!(semantics.role, Role::Radio);
+        assert_eq!(
+            semantics.identifier.as_deref(),
+            Some("settings-theme-option-2")
+        );
+        assert_eq!(semantics.label.as_deref(), Some("Dark"));
+        assert_eq!(semantics.checked, Some(true));
+        assert!(semantics.value.is_none());
     }
 }
