@@ -456,10 +456,14 @@ fn site_enhancement_script(options: &HtmlRenderOptions) -> String {
 }
 
 fn site_enhancement_script_href(stylesheet_href: &str) -> String {
-    stylesheet_href
+    let (stylesheet_path, suffix) = stylesheet_href
+        .split_once('?')
+        .map(|(path, query)| (path, format!("?{query}")))
+        .unwrap_or((stylesheet_href, String::new()));
+    stylesheet_path
         .strip_suffix("site.css")
-        .map(|prefix| format!("{prefix}site-enhancement.js"))
-        .unwrap_or_else(|| "site-enhancement.js".to_string())
+        .map(|prefix| format!("{prefix}site-enhancement.js{suffix}"))
+        .unwrap_or_else(|| format!("site-enhancement.js{suffix}"))
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -637,7 +641,7 @@ fn normalize_style(style: Vec<String>) -> Option<String> {
     Some(style.join(";"))
 }
 
-fn stable_hash(bytes: &[u8]) -> u64 {
+pub(crate) fn stable_hash(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
         hash ^= u64::from(*byte);
@@ -4603,4 +4607,11 @@ mod tests {
             "the first case must be emitted last so equal-specificity CSS wins"
         );
     }
+}
+#[test]
+fn enhancement_script_keeps_stylesheet_cache_revision() {
+    assert_eq!(
+        site_enhancement_script_href("../../site.css?v=abc123"),
+        "../../site-enhancement.js?v=abc123"
+    );
 }

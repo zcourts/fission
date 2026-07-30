@@ -27,12 +27,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU16, AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 pub const MAX_SERVER_ACTION_BODY_BYTES: usize = 1024 * 1024;
 pub const DEFAULT_SESSION_COOKIE_NAME: &str = "fission_session";
 const SERVER_BROWSER_RUNTIME_JS: &str = include_str!("../assets/server-runtime.js");
+const ROUTE_STYLESHEET_PREFIX: &str = "/__fission/route-styles/";
+const IMMUTABLE_ASSET_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+const ROUTE_STYLESHEET_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 static SESSION_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -138,7 +141,6 @@ pub struct RenderedServerRoute {
 pub struct ServerRenderer {
     app: FissionServerApp,
     cache: Arc<dyn Cache>,
-    style_cache: RwLock<BTreeMap<String, String>>,
     jobs: ServerJobRegistry,
     action_signer: ServerActionSigner,
     allowed_action_origins: BTreeSet<String>,
@@ -159,7 +161,6 @@ impl ServerRenderer {
         Self {
             app,
             cache: Arc::new(MokaCache::default()),
-            style_cache: RwLock::new(BTreeMap::new()),
             jobs,
             action_signer: ServerActionSigner::development(),
             allowed_action_origins: BTreeSet::new(),
@@ -368,7 +369,7 @@ impl ServerRenderer {
                 match entry.freshness(now) {
                     Freshness::Fresh | Freshness::Stale => {
                         if let Some(page) = entry.rendered_page() {
-                            self.remember_route_css(&route_path, &page.css)?;
+                            self.remember_route_css(&page.css)?;
                             let mut response = page_response(page, entry.freshness(now));
                             response.headers.push((
                                 "x-fission-cache".to_string(),
@@ -560,6 +561,7 @@ impl ServerRenderer {
                 route.route.description.clone(),
             )
         };
+        let global_stylesheet_href = self.site_stylesheet_href()?;
         let render_options = HtmlRenderOptions {
             lang: env.locale.0.clone(),
             document_title: document_metadata.title,
@@ -567,7 +569,7 @@ impl ServerRenderer {
             canonical_url: self.canonical_url_for_route(&route_path, request),
             site_name: Some(self.app.project_name.clone()),
             favicon_href: None,
-            stylesheet_href: "/site.css".to_string(),
+            stylesheet_href: global_stylesheet_href.clone(),
             current_route_path: route_path.clone(),
             css_variables: CssVariableMap::from_theme(&env.theme),
             default_theme_mode: self.app.default_theme_mode,
@@ -591,11 +593,16 @@ impl ServerRenderer {
             ..Default::default()
         };
         let rendered = render_ir_to_html_with_styles(&lowering.ir, &render_options, &mut styles)?;
-        let css = rendered.css.clone();
-        self.remember_route_css(&route_path, &css)?;
+        let css = self.complete_page_css(&rendered.css);
+        let route_stylesheet_href = self.remember_route_css(&css)?;
+        let html = replace_stylesheet_href(
+            rendered.html,
+            &global_stylesheet_href,
+            &route_stylesheet_href,
+        )?;
         Ok(RenderedServerRoute {
             route: route.route.clone(),
-            html: rendered.html,
+            html,
             css,
             resources,
             server_action_count,
@@ -606,8 +613,7 @@ impl ServerRenderer {
     fn handle_asset_request(&self, request_path: &str) -> Result<Option<ServerResponse>> {
         match request_path {
             "/site.css" => Ok(Some(self.site_css_response()?)),
-            "/site-enhancement.js" => Ok(Some(ServerResponse::text(
-                200,
+            "/site-enhancement.js" => Ok(Some(immutable_asset_response(
                 "application/javascript; charset=utf-8",
                 site_enhancement_js(),
             ))),
@@ -617,12 +623,22 @@ impl ServerRenderer {
                 SERVER_BROWSER_RUNTIME_JS,
             ))),
             "/favicon.ico" => Ok(Some(self.favicon_response()?)),
+            path if path.starts_with(ROUTE_STYLESHEET_PREFIX) => {
+                Ok(Some(self.route_stylesheet_response(path)?))
+            }
             path if path.starts_with("/assets/") => Ok(Some(self.project_asset_response(path)?)),
             _ => Ok(None),
         }
     }
 
     fn site_css_response(&self) -> Result<ServerResponse> {
+        Ok(immutable_asset_response(
+            "text/css; charset=utf-8",
+            self.site_css_content(),
+        ))
+    }
+
+    fn site_css_content(&self) -> String {
         let mut css = String::new();
         css.push_str(site_base_css());
         css.push_str(
@@ -644,27 +660,73 @@ impl ServerRenderer {
         } else {
             css.push_str(&theme_variables_css(":root", &self.app.theme));
         }
-        let styles = self
-            .style_cache
-            .read()
-            .map_err(|_| anyhow!("server style cache lock poisoned"))?;
-        for style in styles.values() {
-            css.push('\n');
-            css.push_str(style);
-        }
         for user_css in &self.app.user_css {
             css.push('\n');
             css.push_str(user_css);
         }
-        Ok(ServerResponse::text(200, "text/css; charset=utf-8", css))
+        css
     }
 
-    fn remember_route_css(&self, route_path: &str, css: &str) -> Result<()> {
-        self.style_cache
-            .write()
-            .map_err(|_| anyhow!("server style cache lock poisoned"))?
-            .insert(route_path.to_string(), css.to_string());
-        Ok(())
+    fn site_stylesheet_href(&self) -> Result<String> {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"fission.server.global-assets.v1");
+        hasher.update(cache_build_id().as_bytes());
+        hasher.update(self.site_css_content().as_bytes());
+        hasher.update(site_enhancement_js().as_bytes());
+        let digest = hasher.finalize().to_hex();
+        Ok(format!("/site.css?v={}", &digest[..16]))
+    }
+
+    fn complete_page_css(&self, route_css: &str) -> String {
+        let mut css = self.site_css_content();
+        css.push('\n');
+        css.push_str(route_css);
+        css
+    }
+
+    fn remember_route_css(&self, css: &str) -> Result<String> {
+        let digest = route_stylesheet_digest(css);
+        let href = format!("{ROUTE_STYLESHEET_PREFIX}{digest}.css");
+        let key = route_stylesheet_cache_key(&digest);
+        self.cache.put(CacheEntry::public_fragment(
+            key,
+            css.to_string(),
+            ROUTE_STYLESHEET_TTL,
+            CacheMetadata::public_asset(&href, "text/css; charset=utf-8"),
+        ))?;
+        Ok(href)
+    }
+
+    fn route_stylesheet_response(&self, request_path: &str) -> Result<ServerResponse> {
+        let Some(digest) = request_path
+            .strip_prefix(ROUTE_STYLESHEET_PREFIX)
+            .and_then(|value| value.strip_suffix(".css"))
+            .filter(|value| is_route_stylesheet_digest(value))
+        else {
+            return Ok(ServerResponse::text(
+                404,
+                "text/plain; charset=utf-8",
+                "stylesheet not found",
+            ));
+        };
+        let Some(entry) = self.cache.get(&route_stylesheet_cache_key(digest))? else {
+            return Ok(ServerResponse::text(
+                404,
+                "text/plain; charset=utf-8",
+                "stylesheet not found",
+            ));
+        };
+        let Some(css) = entry.fragment() else {
+            return Ok(ServerResponse::text(
+                404,
+                "text/plain; charset=utf-8",
+                "stylesheet not found",
+            ));
+        };
+        Ok(immutable_asset_response(
+            "text/css; charset=utf-8",
+            css.as_bytes().to_vec(),
+        ))
     }
 
     fn favicon_response(&self) -> Result<ServerResponse> {
@@ -1070,6 +1132,37 @@ fn cache_build_id_from(
         .unwrap_or_else(|| package_version.to_string())
 }
 
+fn route_stylesheet_digest(css: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fission.server.route-stylesheet.v1");
+    hasher.update(cache_build_id().as_bytes());
+    hasher.update(css.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn route_stylesheet_cache_key(digest: &str) -> CacheKey {
+    CacheKey::new(format!("route-stylesheet:{digest}"))
+}
+
+fn is_route_stylesheet_digest(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn replace_stylesheet_href(html: String, current_href: &str, route_href: &str) -> Result<String> {
+    let current = format!("<link rel=\"stylesheet\" href=\"{current_href}\">");
+    if !html.contains(&current) {
+        anyhow::bail!("server-rendered document is missing its primary stylesheet link");
+    }
+    Ok(html.replacen(
+        &current,
+        &format!("<link rel=\"stylesheet\" href=\"{route_href}\">"),
+        1,
+    ))
+}
+
 fn matched_route(route: &ServerRouteEntry, request: &ServerRequest) -> ServerRouteMatch {
     let request_path = normalize_server_path(&request.path);
     route
@@ -1380,6 +1473,15 @@ fn file_response(path: &Path) -> Result<ServerResponse> {
     })
 }
 
+fn immutable_asset_response(content_type: &str, body: impl Into<Vec<u8>>) -> ServerResponse {
+    let mut response = ServerResponse::text(200, content_type, body);
+    response.headers.push((
+        "cache-control".to_string(),
+        IMMUTABLE_ASSET_CACHE_CONTROL.to_string(),
+    ));
+    response
+}
+
 fn content_type_for_path(path: &Path) -> &'static str {
     match path
         .extension()
@@ -1570,6 +1672,21 @@ mod tests {
         fn from(component: TestPage) -> Self {
             let (_ctx, _view) = fission_core::build::current::<TestState>();
             Text::new(component.0).into()
+        }
+    }
+
+    #[derive(Clone)]
+    struct SizedTestPage {
+        label: &'static str,
+        font_size: f32,
+    }
+
+    impl From<SizedTestPage> for Widget {
+        fn from(component: SizedTestPage) -> Self {
+            let (_ctx, _view) = fission_core::build::current::<TestState>();
+            let mut text = Text::new(component.label);
+            text.font_size = Some(component.font_size);
+            text.into()
         }
     }
 
@@ -2607,6 +2724,17 @@ same_site = "none"
 
         let page = renderer.handle(ServerRequest::get("/")).unwrap();
         assert_eq!(page.status, 200);
+        let page_html = page.body_string();
+        assert!(page_html.contains(r#"src="/site-enhancement.js?v="#));
+        assert!(!page_html.contains(r#"href="/site.css?v="#));
+        let route_href_start = page_html
+            .find(ROUTE_STYLESHEET_PREFIX)
+            .expect("page must reference its content-addressed route stylesheet");
+        let route_href_end = page_html[route_href_start..]
+            .find('"')
+            .map(|offset| route_href_start + offset)
+            .unwrap();
+        let route_href = &page_html[route_href_start..route_href_end];
 
         let css = renderer.handle(ServerRequest::get("/site.css")).unwrap();
         assert_eq!(css.status, 200);
@@ -2618,6 +2746,23 @@ same_site = "none"
         assert!(css.contains(".fission-site-root"));
         assert!(css.contains(".fission-site-positioned > .fission-site-semantics"));
         assert!(css.contains(":root"));
+        assert_eq!(
+            response_header(
+                &renderer.handle(ServerRequest::get("/site.css")).unwrap(),
+                "cache-control"
+            ),
+            Some(IMMUTABLE_ASSET_CACHE_CONTROL)
+        );
+
+        let route_css = renderer.handle(ServerRequest::get(route_href)).unwrap();
+        assert_eq!(route_css.status, 200);
+        assert_eq!(
+            response_header(&route_css, "content-type"),
+            Some("text/css; charset=utf-8")
+        );
+        assert!(route_css.body_string().contains(".fission-site-root"));
+        assert!(route_css.body_string().contains(":root"));
+        assert!(route_css.body_string().contains(".fs_"));
 
         let js = renderer
             .handle(ServerRequest::get("/site-enhancement.js"))
@@ -2626,6 +2771,10 @@ same_site = "none"
         assert_eq!(
             response_header(&js, "content-type"),
             Some("application/javascript; charset=utf-8")
+        );
+        assert_eq!(
+            response_header(&js, "cache-control"),
+            Some(IMMUTABLE_ASSET_CACHE_CONTROL)
         );
         assert!(js.body_string().contains("fission-site-js"));
 
@@ -2640,6 +2789,64 @@ same_site = "none"
         let runtime = runtime.body_string();
         assert!(runtime.contains("fission_bridge_alloc"));
         assert!(runtime.contains("fission-site-text-run"));
+    }
+
+    #[test]
+    fn server_renderer_keeps_route_styles_isolated_and_addressable() {
+        let renderer = ServerRenderer::new(
+            FissionServerApp::new("Test")
+                .server_route_widget::<TestState, _>(
+                    "/small",
+                    "Small",
+                    None,
+                    SizedTestPage {
+                        label: "Small type",
+                        font_size: 13.0,
+                    },
+                )
+                .server_route_widget::<TestState, _>(
+                    "/large",
+                    "Large",
+                    None,
+                    SizedTestPage {
+                        label: "Large type",
+                        font_size: 31.0,
+                    },
+                ),
+        );
+
+        let small = renderer
+            .handle(ServerRequest::get("/small"))
+            .unwrap()
+            .body_string();
+        let large = renderer
+            .handle(ServerRequest::get("/large"))
+            .unwrap()
+            .body_string();
+        let stylesheet_href = |html: &str| {
+            let start = html.find(ROUTE_STYLESHEET_PREFIX).unwrap();
+            let end = html[start..]
+                .find('"')
+                .map(|offset| start + offset)
+                .unwrap();
+            html[start..end].to_string()
+        };
+        let small_href = stylesheet_href(&small);
+        let large_href = stylesheet_href(&large);
+
+        assert_ne!(small_href, large_href);
+        let small_css = renderer
+            .handle(ServerRequest::get(small_href))
+            .unwrap()
+            .body_string();
+        let large_css = renderer
+            .handle(ServerRequest::get(large_href))
+            .unwrap()
+            .body_string();
+        assert!(small_css.contains("font-size:13px"));
+        assert!(!small_css.contains("font-size:31px"));
+        assert!(large_css.contains("font-size:31px"));
+        assert!(!large_css.contains("font-size:13px"));
     }
 
     #[test]
