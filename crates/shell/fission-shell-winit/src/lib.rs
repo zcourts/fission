@@ -21,6 +21,8 @@ use winit::platform::android::{activity::AndroidApp, EventLoopBuilderExtAndroid}
 use winit::platform::ios::WindowAttributesExtIOS;
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{ActivationPolicy, EventLoopBuilderExtMacOS};
+#[cfg(target_os = "linux")]
+use winit::platform::wayland::ActiveEventLoopExtWayland;
 #[cfg(target_arch = "wasm32")]
 use winit::platform::web::{EventLoopExtWebSys, WindowAttributesExtWebSys, WindowExtWebSys};
 #[cfg(target_os = "windows")]
@@ -707,6 +709,24 @@ fn present_startup_clear_frame(
     device_handle.queue.submit(Some(encoder.finish()));
     surface_texture.present();
     Ok(())
+}
+
+fn should_present_startup_clear_frame(linux_wayland: bool) -> bool {
+    // A Wayland Vulkan presentation can wait for compositor dispatch. Doing
+    // that synchronously from `Event::Resumed` prevents the event loop from
+    // servicing the dispatch it is waiting for. The normal first redraw is
+    // already requested and presents the authored frame instead.
+    !linux_wayland
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_wayland_event_loop(event_loop: &EventLoopWindowTarget) -> bool {
+    event_loop.is_wayland()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_linux_wayland_event_loop(_event_loop: &EventLoopWindowTarget) -> bool {
+    false
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -6005,12 +6025,16 @@ where
                                 current_viewport,
                             ) {
                                 Ok(mut state) => {
-                                    if let Err(err) = present_startup_clear_frame(
-                                        &mut state,
-                                        &render_cx,
-                                        theme_background_wgpu_color(&env),
+                                    if should_present_startup_clear_frame(
+                                        is_linux_wayland_event_loop(elwt),
                                     ) {
-                                        eprintln!("startup clear frame failed: {err}");
+                                        if let Err(err) = present_startup_clear_frame(
+                                            &mut state,
+                                            &render_cx,
+                                            theme_background_wgpu_color(&env),
+                                        ) {
+                                            eprintln!("startup clear frame failed: {err}");
+                                        }
                                     }
                                     render_state = Some(state);
                                 }
@@ -8966,10 +8990,10 @@ mod tests {
         physical_size_to_layout_size, preferred_surface_alpha_mode,
         rect_visible_in_scroll_ancestors, repeating_animation_redraw_interval, resize_is_unsettled,
         resolve_build_viewport, resolve_selector_record, should_auto_select_native_software,
-        surface_acquire_recovery, sync_tracked_target_texture_size_to_surface,
-        texture_plans_fit_device_limits, visual_rect_for_node, window_insets_from_safe_area_frames,
-        windows_shell_execute_succeeded, windows_wide, LiveResizeController,
-        SurfaceAcquireRecovery, WindowViewportState,
+        should_present_startup_clear_frame, surface_acquire_recovery,
+        sync_tracked_target_texture_size_to_surface, texture_plans_fit_device_limits,
+        visual_rect_for_node, window_insets_from_safe_area_frames, windows_shell_execute_succeeded,
+        windows_wide, LiveResizeController, SurfaceAcquireRecovery, WindowViewportState,
     };
     use crate::pipeline::CompositorTexturePlan;
     use crate::renderer_diagnostics::RendererRequest;
@@ -9651,6 +9675,12 @@ mod tests {
         let rounded =
             layout_size_to_image_dimensions(fission_layout::LayoutSize::new(999.6, 700.4));
         assert_eq!(rounded, (1000, 700));
+    }
+
+    #[test]
+    fn linux_wayland_defers_startup_clear_to_the_first_redraw() {
+        assert!(!should_present_startup_clear_frame(true));
+        assert!(should_present_startup_clear_frame(false));
     }
 
     #[test]
