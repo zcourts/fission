@@ -3,7 +3,6 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 #[cfg(any(target_os = "macos", test))]
 use sha1::{Digest as _, Sha1};
-#[cfg(any(target_os = "macos", test))]
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
