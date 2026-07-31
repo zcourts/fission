@@ -90,6 +90,81 @@ fn release_desktop_builds_require_the_existing_lockfile() {
 }
 
 #[test]
+fn desktop_package_variants_forward_effective_cargo_options() {
+    let root = std::env::temp_dir().join(format!(
+        "fission-package-cargo-options-{}",
+        std::process::id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("fission.toml"),
+        r#"
+[package.linux.variants.enhanced]
+cargo_features = ["shared", "linux-enhanced"]
+cargo_no_default_features = true
+
+[package.windows.variants.enhanced]
+cargo_features = ["windows-enhanced", "shared"]
+"#,
+    )
+    .unwrap();
+    let variant: NativeVariant = "enhanced".parse().unwrap();
+
+    let linux = PackageOptions {
+        project_dir: root.clone(),
+        target: Target::Linux,
+        format: PackageFormat::Run,
+        release: true,
+        variant: Some(variant.clone()),
+        json: false,
+    };
+    let linux_options = desktop_package_cargo_options(&linux).unwrap();
+    assert_eq!(
+        linux_options.features,
+        ["linux-enhanced".to_string(), "shared".to_string()]
+    );
+    assert!(linux_options.no_default_features);
+
+    let windows = PackageOptions {
+        project_dir: root.clone(),
+        target: Target::Windows,
+        format: PackageFormat::Exe,
+        release: true,
+        variant: Some(variant),
+        json: false,
+    };
+    let windows_options = desktop_package_cargo_options(&windows).unwrap();
+    assert_eq!(
+        windows_options.features,
+        ["shared".to_string(), "windows-enhanced".to_string()]
+    );
+    assert!(!windows_options.no_default_features);
+
+    let manifest_path = root.join("Cargo.toml");
+    let command = desktop_cargo_build_command(
+        &root,
+        &manifest_path,
+        "example-app",
+        true,
+        &linux_options.features,
+        linux_options.no_default_features,
+    );
+    let args = command
+        .get_args()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(args
+        .iter()
+        .any(|argument| argument == "--no-default-features"));
+    assert!(args
+        .windows(2)
+        .any(|pair| pair == ["--features", "linux-enhanced,shared"]));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn server_dockerfile_builds_workspace_package_and_artifacts() {
     let dockerfile = render_server_dockerfile(
         "debian:bookworm-slim",
