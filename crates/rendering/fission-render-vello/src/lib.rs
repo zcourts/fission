@@ -8,6 +8,9 @@ use fission_ir::op::{
     TextDirection, TextHeightBehavior, TextOverflow, TextParagraphStyle, TextWidthBasis,
 };
 use fission_render::{
+    inline_svg::{
+        parse_inline_svg, InlineSvg, InlineSvgFillRule, InlineSvgPaintOrder, InlineSvgPathSegment,
+    },
     surface_placeholder_color, Color as RenderColor, DisplayList, DisplayOp, LayerClip,
     RenderLayer, RenderNode, RenderScene, Renderer, TextStyle as RenderTextStyle,
 };
@@ -739,7 +742,7 @@ fn paragraph_fade(
 
 lazy_static! {
     static ref IMAGE_CACHE: ImageCacheStore<ImageCacheEntry> = build_image_cache();
-    static ref SVG_CACHE: Mutex<HashMap<u64, Arc<SvgCacheEntry>>> = Mutex::new(HashMap::new());
+    static ref SVG_CACHE: Mutex<HashMap<u64, Arc<InlineSvg>>> = Mutex::new(HashMap::new());
 }
 
 static IMAGE_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -1163,133 +1166,42 @@ mod image_tests {
     }
 }
 
-#[derive(Debug)]
-struct SvgCacheEntry {
-    view_box: Option<(f64, f64, f64, f64)>,
-    shapes: Vec<SvgShape>,
-}
-
-#[derive(Debug)]
-enum SvgShape {
-    Path(BezPath),
-    Rect(RoundedRect),
-}
-
 fn svg_cache_key(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     content.hash(&mut hasher);
     hasher.finish()
 }
 
-fn parse_svg_entry(content: &str) -> SvgCacheEntry {
-    let parse_view_box = |data: &str| -> Option<(f64, f64, f64, f64)> {
-        let key = "viewBox=\"";
-        let start = data.find(key)?;
-        let rest = &data[start + key.len()..];
-        let end = rest.find('\"')?;
-        let nums: Vec<f64> = rest[..end]
-            .split(|c: char| c.is_whitespace() || c == ',')
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        if nums.len() == 4 {
-            Some((nums[0], nums[1], nums[2], nums[3]))
-        } else {
-            None
-        }
-    };
-
-    let mut shapes = Vec::new();
-
-    // Use regex-like manual parsing for robustness
-    let path_regex = "d=\"";
-    let _rect_regex = "<rect";
-    let _poly_regex = "<polygon";
-
-    // Re-implemented parsing using tag-based split for more reliability
-    for tag in content.split('<').skip(1) {
-        let tag = tag.split('>').next().unwrap_or("");
-        let tag_name = tag.split_whitespace().next().unwrap_or("");
-
-        if tag_name == "path" {
-            if let Some(d_start) = tag.find(path_regex) {
-                let after_d = &tag[d_start + 3..];
-                if let Some(d_end) = after_d.find('\"') {
-                    let mut d = after_d[..d_end].to_string();
-                    // Clean known bounding boxes
-                    d = d.replace("M0 0h24v24H0z", "");
-                    d = d.replace("M0 0h24v24H0V0z", "");
-                    d = d.replace("M0,0h24v24H0V0z", "");
-                    if !d.trim().is_empty() {
-                        if let Ok(bez_path) = BezPath::from_svg(&d) {
-                            shapes.push(SvgShape::Path(bez_path));
-                        }
-                    }
-                }
+fn inline_svg_bez_path(segments: &[InlineSvgPathSegment]) -> BezPath {
+    let mut path = BezPath::new();
+    for segment in segments {
+        match *segment {
+            InlineSvgPathSegment::MoveTo(x, y) => path.move_to((x as f64, y as f64)),
+            InlineSvgPathSegment::LineTo(x, y) => path.line_to((x as f64, y as f64)),
+            InlineSvgPathSegment::QuadTo(cx, cy, x, y) => {
+                path.quad_to((cx as f64, cy as f64), (x as f64, y as f64));
             }
-        } else if tag_name == "rect" {
-            if tag.contains("fill=\"none\"") || tag.contains("fill='none'") {
-                continue;
+            InlineSvgPathSegment::CubicTo(cx1, cy1, cx2, cy2, x, y) => {
+                path.curve_to(
+                    (cx1 as f64, cy1 as f64),
+                    (cx2 as f64, cy2 as f64),
+                    (x as f64, y as f64),
+                );
             }
-            let parse_attr = |name: &str| -> f64 {
-                if let Some(pos) = tag.find(&format!("{}=\"", name)) {
-                    let after = &tag[pos + name.len() + 2..];
-                    if let Some(end) = after.find('\"') {
-                        return after[..end].parse().unwrap_or(0.0);
-                    }
-                }
-                0.0
-            };
-            let x = parse_attr("x");
-            let y = parse_attr("y");
-            let w = parse_attr("width");
-            let h = parse_attr("height");
-            if w > 0.0 && h > 0.0 {
-                shapes.push(SvgShape::Rect(RoundedRect::from_rect(
-                    Rect::new(x, y, x + w, y + h),
-                    0.0,
-                )));
-            }
-        } else if tag_name == "polygon" {
-            if let Some(p_start) = tag.find("points=\"") {
-                let after = &tag[p_start + 8..];
-                if let Some(end) = after.find('\"') {
-                    let points_str = &after[..end];
-                    let nums: Vec<f64> = points_str
-                        .split(|c: char| c.is_whitespace() || c == ',')
-                        .filter(|s| !s.is_empty())
-                        .filter_map(|s| s.parse().ok())
-                        .collect();
-                    if nums.len() >= 4 {
-                        let mut bez = BezPath::new();
-                        bez.move_to((nums[0], nums[1]));
-                        for i in (2..nums.len()).step_by(2) {
-                            if i + 1 < nums.len() {
-                                bez.line_to((nums[i], nums[i + 1]));
-                            }
-                        }
-                        bez.close_path();
-                        shapes.push(SvgShape::Path(bez));
-                    }
-                }
-            }
+            InlineSvgPathSegment::Close => path.close_path(),
         }
     }
-
-    SvgCacheEntry {
-        view_box: parse_view_box(content),
-        shapes,
-    }
+    path
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         map_fill_to_brush, paragraph_alignment, paragraph_fade, paragraph_line_trim,
-        paragraph_line_visual_bounds, paragraph_y_offset, parse_svg_entry,
+        paragraph_line_visual_bounds, paragraph_y_offset,
         text_background_segments_for_cluster_ranges, workload_profile_for_encoded_scene,
-        workload_profile_for_scene, ParagraphFade, RetainedSceneCache, SvgShape,
-        TextBackgroundSegment, TextClip, VelloRenderer, VelloTextMeasurer,
+        workload_profile_for_scene, ParagraphFade, RetainedSceneCache, TextBackgroundSegment,
+        TextClip, VelloRenderer, VelloTextMeasurer,
     };
     use fission_ir::op::{
         FontStyle, MouseCursor, RichTextAnnotation, TextAlign, TextDirection, TextHeightBehavior,
@@ -1348,14 +1260,22 @@ mod tests {
     }
 
     #[test]
-    fn svg_parser_skips_fill_none_rect_placeholders() {
-        let svg = r#"<svg viewBox="0 0 24 24">
+    fn svg_parser_preserves_authored_paint_and_skips_non_painting_placeholders() {
+        let svg = r##"<svg viewBox="0 0 24 24">
             <rect fill="none" width="24" height="24"/>
-            <path d="M0 0h10v10H0z"/>
-        </svg>"#;
-        let entry = parse_svg_entry(svg);
-        assert_eq!(entry.shapes.len(), 1);
-        assert!(matches!(entry.shapes[0], SvgShape::Path(_)));
+            <path fill="#12a150" d="M0 0h10v10H0z"/>
+        </svg>"##;
+        let entry = fission_render::inline_svg::parse_inline_svg(svg).expect("parse SVG");
+        assert_eq!(entry.paths.len(), 1);
+        assert_eq!(
+            entry.paths[0].fill,
+            Some(RenderFill::Solid(RenderColor {
+                r: 0x12,
+                g: 0xa1,
+                b: 0x50,
+                a: 0xff,
+            }))
+        );
     }
 
     #[test]
@@ -1980,13 +1900,17 @@ mod tests {
     }
 }
 
-fn svg_cache_entry(content: &str) -> Arc<SvgCacheEntry> {
+fn svg_cache_entry(content: &str) -> Arc<InlineSvg> {
     let key = svg_cache_key(content);
     if let Some(entry) = SVG_CACHE.lock().unwrap().get(&key) {
         return Arc::clone(entry);
     }
 
-    let parsed = Arc::new(parse_svg_entry(content));
+    let parsed = Arc::new(parse_inline_svg(content).unwrap_or(InlineSvg {
+        width: 0.0,
+        height: 0.0,
+        paths: Vec::new(),
+    }));
     let mut cache = SVG_CACHE.lock().unwrap();
     cache.entry(key).or_insert_with(|| Arc::clone(&parsed));
     parsed
@@ -3742,12 +3666,8 @@ impl<'a> VelloRenderer<'a> {
                     ..
                 } => {
                     let entry = svg_cache_entry(content);
-                    let (vb_x, vb_y, vb_w, vb_h) = entry.view_box.unwrap_or((
-                        0.0,
-                        0.0,
-                        bounds.size.width as f64,
-                        bounds.size.height as f64,
-                    ));
+                    let (vb_x, vb_y, vb_w, vb_h) =
+                        (0.0, 0.0, entry.width as f64, entry.height as f64);
                     let rect_w = bounds.size.width as f64;
                     let rect_h = bounds.size.height as f64;
                     let (scale, dx, dy) =
@@ -3766,52 +3686,49 @@ impl<'a> VelloRenderer<'a> {
                     let svg_transform =
                         self.current_transform * Affine::translate((dx, dy)) * Affine::scale(scale);
                     let paint_bounds = Rect::new(vb_x, vb_y, vb_x + vb_w, vb_y + vb_h);
+                    let has_paint_override = fill.is_some() || stroke.is_some();
 
-                    for shape in &entry.shapes {
-                        match shape {
-                            SvgShape::Path(path) => {
-                                if let Some(f) = fill {
-                                    let brush = map_fill_to_brush(f, paint_bounds);
-                                    self.scene.fill(
-                                        Fill::NonZero,
-                                        svg_transform,
-                                        &brush,
-                                        None,
-                                        path,
-                                    );
-                                }
-                                if let Some(s) = stroke {
-                                    let (stroke_style, brush) = map_stroke(s, paint_bounds);
-                                    self.scene.stroke(
-                                        &stroke_style,
-                                        svg_transform,
-                                        &brush,
-                                        None,
-                                        path,
-                                    );
-                                }
+                    for svg_path in &entry.paths {
+                        let path = inline_svg_bez_path(&svg_path.segments);
+                        let [sx, ky, kx, sy, tx, ty] = svg_path.transform;
+                        let transform = svg_transform
+                            * Affine::new([
+                                sx as f64, ky as f64, kx as f64, sy as f64, tx as f64, ty as f64,
+                            ]);
+                        let effective_fill = if has_paint_override {
+                            fill.as_ref()
+                        } else {
+                            svg_path.fill.as_ref()
+                        };
+                        let effective_stroke = if has_paint_override {
+                            stroke.as_ref()
+                        } else {
+                            svg_path.stroke.as_ref()
+                        };
+                        let fill_rule = match svg_path.fill_rule {
+                            InlineSvgFillRule::NonZero => Fill::NonZero,
+                            InlineSvgFillRule::EvenOdd => Fill::EvenOdd,
+                        };
+                        let draw_fill = |scene: &mut Scene| {
+                            if let Some(fill) = effective_fill {
+                                let brush = map_fill_to_brush(fill, paint_bounds);
+                                scene.fill(fill_rule, transform, &brush, None, &path);
                             }
-                            SvgShape::Rect(rect) => {
-                                if let Some(f) = fill {
-                                    let brush = map_fill_to_brush(f, paint_bounds);
-                                    self.scene.fill(
-                                        Fill::NonZero,
-                                        svg_transform,
-                                        &brush,
-                                        None,
-                                        rect,
-                                    );
-                                }
-                                if let Some(s) = stroke {
-                                    let (stroke_style, brush) = map_stroke(s, paint_bounds);
-                                    self.scene.stroke(
-                                        &stroke_style,
-                                        svg_transform,
-                                        &brush,
-                                        None,
-                                        rect,
-                                    );
-                                }
+                        };
+                        let draw_stroke = |scene: &mut Scene| {
+                            if let Some(stroke) = effective_stroke {
+                                let (stroke_style, brush) = map_stroke(stroke, paint_bounds);
+                                scene.stroke(&stroke_style, transform, &brush, None, &path);
+                            }
+                        };
+                        match svg_path.paint_order {
+                            InlineSvgPaintOrder::FillAndStroke => {
+                                draw_fill(self.scene);
+                                draw_stroke(self.scene);
+                            }
+                            InlineSvgPaintOrder::StrokeAndFill => {
+                                draw_stroke(self.scene);
+                                draw_fill(self.scene);
                             }
                         }
                     }

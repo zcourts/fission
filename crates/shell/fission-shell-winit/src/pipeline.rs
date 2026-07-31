@@ -2420,8 +2420,8 @@ mod tests {
     use fission_core::MotionPropertyId;
     use fission_core::ScrollStateMap;
     use fission_ir::op::{
-        Color, Fill, ImageAlignment, ImageFit, ImageRequest, ImageSource, RichTextAnnotation,
-        TextRun, TextStyle,
+        Color, Fill, ImageAlignment, ImageFit, ImageRequest, ImageSource, ResponsiveCondition,
+        ResponsiveQuery, RichTextAnnotation, TextRun, TextStyle,
     };
     use fission_ir::semantics::ActionTrigger;
     use fission_ir::{
@@ -2751,6 +2751,140 @@ mod tests {
         assert_eq!(*alignment, ImageAlignment::Center);
         assert_eq!(rect.size.width, 220.0);
         assert_eq!(rect.size.height, 160.0);
+    }
+
+    #[test]
+    fn viewport_resize_activates_responsive_svg_branch_without_replacing_ir() {
+        let responsive_id = WidgetId::derived(140, &[0]);
+        let compact_id = WidgetId::derived(140, &[1]);
+        let compact_svg_id = WidgetId::derived(140, &[2]);
+        let compact_sibling_id = WidgetId::derived(140, &[3]);
+        let wide_id = WidgetId::derived(140, &[4]);
+        let wide_paint_id = WidgetId::derived(140, &[5]);
+        let box_op = || {
+            Op::Layout(LayoutOp::Box {
+                width: Some(48.0),
+                height: Some(32.0),
+                min_width: None,
+                max_width: None,
+                min_height: None,
+                max_height: None,
+                padding: [0.0; 4],
+                flex_grow: 0.0,
+                flex_shrink: 0.0,
+                aspect_ratio: None,
+            })
+        };
+        let solid_fill = Fill::Solid(Color {
+            r: 32,
+            g: 64,
+            b: 96,
+            a: 255,
+        });
+        let mut ir = CoreIR::new();
+        ir.add_node(
+            compact_svg_id,
+            Op::Paint(PaintOp::DrawSvg {
+                content:
+                    r##"<svg viewBox="0 0 24 24"><path d="M2 2h20v20H2z" fill="#12a150"/></svg>"##
+                        .into(),
+                fill: None,
+                stroke: None,
+            }),
+            vec![],
+        );
+        ir.add_node(
+            compact_sibling_id,
+            Op::Paint(PaintOp::DrawRect {
+                fill: Some(solid_fill.clone()),
+                stroke: None,
+                corner_radius: 0.0,
+                shadow: None,
+            }),
+            vec![],
+        );
+        ir.add_node(
+            compact_id,
+            box_op(),
+            vec![compact_svg_id, compact_sibling_id],
+        );
+        ir.add_node(
+            wide_paint_id,
+            Op::Paint(PaintOp::DrawRect {
+                fill: Some(solid_fill),
+                stroke: None,
+                corner_radius: 0.0,
+                shadow: None,
+            }),
+            vec![],
+        );
+        ir.add_node(wide_id, box_op(), vec![wide_paint_id]);
+        ir.add_node(
+            responsive_id,
+            Op::Layout(LayoutOp::Responsive {
+                query: ResponsiveQuery::Viewport,
+                cases: vec![ResponsiveCondition {
+                    min_width: None,
+                    max_width: Some(500.0),
+                }],
+            }),
+            vec![compact_id, wide_id],
+        );
+        ir.set_root(responsive_id);
+
+        let mut pipeline = Pipeline::new();
+        let mut layout_engine = LayoutEngine::new();
+        let scroll = ScrollStateMap::default();
+        pipeline.replace_ir(ir, &Env::default());
+
+        let prepare =
+            |pipeline: &mut Pipeline, layout_engine: &mut LayoutEngine, viewport: LayoutSize| {
+                pipeline
+                    .ensure_layout(
+                        LayoutRect::new(0.0, 0.0, viewport.width, viewport.height),
+                        layout_engine,
+                        &scroll,
+                    )
+                    .expect("responsive layout");
+                pipeline
+                    .prepare_current(
+                        viewport,
+                        viewport,
+                        false,
+                        &scroll,
+                        &Default::default(),
+                        &Default::default(),
+                        &Default::default(),
+                    )
+                    .expect("responsive retained scene");
+                pipeline.retained_scene().expect("retained scene").flatten()
+            };
+
+        let wide = prepare(
+            &mut pipeline,
+            &mut layout_engine,
+            LayoutSize::new(800.0, 600.0),
+        );
+        assert!(!wide
+            .ops
+            .iter()
+            .any(|op| matches!(op, DisplayOp::DrawSvg { .. })));
+
+        let compact = prepare(
+            &mut pipeline,
+            &mut layout_engine,
+            LayoutSize::new(360.0, 640.0),
+        );
+        assert!(compact.ops.iter().any(|op| {
+            matches!(
+                op,
+                DisplayOp::DrawSvg { content, .. } if content.contains("#12a150")
+            )
+        }));
+        assert!(compact
+            .ops
+            .iter()
+            .any(|op| matches!(op, DisplayOp::DrawRect { .. })));
     }
 
     #[test]
