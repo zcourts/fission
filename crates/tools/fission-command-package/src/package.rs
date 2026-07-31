@@ -4,12 +4,12 @@ use anyhow::{bail, Context, Result};
 use fission_command_core::{
     build_linux_native_modules, build_windows_native_modules, cargo_package_name,
     embed_and_sign_macos_native_modules, ensure_native_variant_target, normalized_extension,
-    read_macos_package_config_for_profile_and_variant, read_project_config, resolve_app_icon,
-    sign_macos_app_if_configured, stage_linux_native_products, stage_project_assets,
-    stage_windows_runtime_products, sync_platform_config, variant_output_path,
-    BuiltLinuxNativeProduct, BuiltWindowsNativeProduct, FissionProject, MacosNativeBundleMode,
-    MacosPackageConfig, NativeLinuxProductKind, NativeWindowsProductKind, PlatformCapability,
-    Target,
+    read_desktop_cargo_options, read_macos_package_config_for_profile_and_variant,
+    read_project_config, resolve_app_icon, sign_macos_app_if_configured,
+    stage_linux_native_products, stage_project_assets, stage_windows_runtime_products,
+    sync_platform_config, variant_output_path, BuiltLinuxNativeProduct, BuiltWindowsNativeProduct,
+    FissionProject, MacosNativeBundleMode, MacosPackageConfig, NativeLinuxProductKind,
+    NativeWindowsProductKind, PlatformCapability, Target,
 };
 use flate2::write::GzEncoder;
 use flate2::Compression;
@@ -250,7 +250,17 @@ fn package_linux_run(options: &PackageOptions) -> Result<ArtifactManifest> {
     let staging_dir = clean_package_dir(options)?;
     let payload_dir = staging_dir.join("payload");
     fs::create_dir_all(&payload_dir)?;
-    let binary = build_desktop_binary(&options.project_dir, options.release, &[], false)?;
+    let cargo = read_desktop_cargo_options(
+        &options.project_dir,
+        Target::Linux,
+        options.variant.as_ref().map(NativeVariant::as_str),
+    )?;
+    let binary = build_desktop_binary(
+        &options.project_dir,
+        options.release,
+        &cargo.features,
+        cargo.no_default_features,
+    )?;
     let executable_name = binary
         .file_name()
         .and_then(OsStr::to_str)
@@ -454,7 +464,17 @@ fn package_windows_exe(options: &PackageOptions) -> Result<ArtifactManifest> {
     let project = read_project_config(&options.project_dir)?;
     let profile = profile_name(options.release);
     let staging_dir = clean_package_dir(options)?;
-    let binary = build_desktop_binary(&options.project_dir, options.release, &[], false)?;
+    let cargo = read_desktop_cargo_options(
+        &options.project_dir,
+        Target::Windows,
+        options.variant.as_ref().map(NativeVariant::as_str),
+    )?;
+    let binary = build_desktop_binary(
+        &options.project_dir,
+        options.release,
+        &cargo.features,
+        cargo.no_default_features,
+    )?;
     let native_products = build_windows_native_modules(
         &options.project_dir,
         &project,
@@ -575,7 +595,17 @@ fn package_with_project_script(
     }
     let mut environment = Vec::new();
     if target == Target::Windows {
-        let binary = build_desktop_binary(&options.project_dir, options.release, &[], false)?;
+        let cargo = read_desktop_cargo_options(
+            &options.project_dir,
+            Target::Windows,
+            options.variant.as_ref().map(NativeVariant::as_str),
+        )?;
+        let binary = build_desktop_binary(
+            &options.project_dir,
+            options.release,
+            &cargo.features,
+            cargo.no_default_features,
+        )?;
         let native_products = build_windows_native_modules(
             &options.project_dir,
             &project,
