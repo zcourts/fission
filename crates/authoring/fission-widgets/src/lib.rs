@@ -208,6 +208,13 @@ pub use hero::Hero;
 pub mod web_view;
 pub use web_view::WebView;
 
+/// Portable, externally-driven terminal grid for remote and embedded sessions.
+pub mod terminal_surface;
+pub use terminal_surface::{
+    TerminalCellRun, TerminalCursor, TerminalCursorShape, TerminalInput, TerminalKey,
+    TerminalSurface, TerminalSurfaceSnapshot,
+};
+
 #[cfg(all(
     feature = "terminal",
     not(any(target_os = "ios", target_os = "android", target_arch = "wasm32"))
