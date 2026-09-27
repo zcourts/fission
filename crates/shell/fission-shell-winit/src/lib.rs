@@ -3411,6 +3411,19 @@ fn fission_key_down_event(code: KeyCode, modifiers: u8, produced_text: Option<&s
     )
 }
 
+const ANDROID_KEY_IME_DEDUP_WINDOW: Duration = Duration::from_millis(250);
+
+fn android_ime_commit_duplicates_key_text(
+    pending: &mut Option<(String, Instant)>,
+    committed: &str,
+    now: Instant,
+) -> bool {
+    pending.take().is_some_and(|(text, recorded_at)| {
+        text == committed
+            && now.saturating_duration_since(recorded_at) <= ANDROID_KEY_IME_DEDUP_WINDOW
+    })
+}
+
 fn handle_key_down<S: GlobalState>(
     code: KeyCode,
     modifiers: u8,
@@ -5241,6 +5254,8 @@ where
         let mut pending_text_traces: VecDeque<PendingTextTrace> = VecDeque::new();
         #[cfg(target_arch = "wasm32")]
         let mut pending_web_input_at: Option<Instant> = None;
+        #[cfg(target_os = "android")]
+        let mut pending_android_key_text: Option<(String, Instant)> = None;
         let mut current_mods: u8 = 0;
 
         // Test control (enabled via FISSION_TEST_CONTROL_PORT env var).
@@ -9440,6 +9455,23 @@ where
                                 };
 
                                 if let Some(code) = key_code {
+                                    #[cfg(target_os = "android")]
+                                    {
+                                        let text_target = focused_text_input_id(
+                                            &runtime,
+                                            pipeline.prev_ir.as_ref(),
+                                        )
+                                        .is_some()
+                                            || focused_custom_text_input(
+                                                &runtime,
+                                                pipeline.prev_ir.as_ref(),
+                                            );
+                                        pending_android_key_text = text_target
+                                            .then(|| event.text.as_deref())
+                                            .flatten()
+                                            .filter(|text| !text.is_empty())
+                                            .map(|text| (text.to_owned(), Instant::now()));
+                                    }
                                     #[cfg(target_arch = "wasm32")]
                                     let browser_clipboard_chord = runtime
                                         .editing_convention
@@ -9642,6 +9674,20 @@ where
                         WindowEvent::Ime(ime) => {
                             #[cfg(target_arch = "wasm32")]
                             pending_web_input_at.get_or_insert_with(Instant::now);
+                            #[cfg(target_os = "android")]
+                            match &ime {
+                                Ime::Commit(text)
+                                    if android_ime_commit_duplicates_key_text(
+                                        &mut pending_android_key_text,
+                                        text,
+                                        Instant::now(),
+                                    ) =>
+                                {
+                                    return;
+                                }
+                                Ime::Commit(_) => {}
+                                _ => pending_android_key_text = None,
+                            }
                             if let (Some(ir), Some(layout)) =
                                 (&pipeline.prev_ir, &pipeline.last_snapshot)
                             {
@@ -10221,13 +10267,13 @@ fn native_window_size_for_logical_viewport(size: LayoutSize) -> winit::dpi::Logi
 #[cfg(test)]
 mod tests {
     use super::{
-        animation_redraw_interval, build_window_attributes, clamp_copy_extent_to_texture,
-        classify_web_text_value, collect_semantic_records, collect_startup_deep_links_from,
-        cursor_icon_for, downscale_rgba_box, fission_key_down_event, focused_text_input_id,
-        handle_fill_text_selector, layout_size_to_image_dimensions,
-        logical_viewport_to_physical_size, logical_viewport_to_render_target_size,
-        magnification_scale_factor, map_test_pointer_id, map_test_pointer_kind,
-        map_test_pointer_phase, map_test_scroll_delta_mode, map_touch_phase,
+        android_ime_commit_duplicates_key_text, animation_redraw_interval, build_window_attributes,
+        clamp_copy_extent_to_texture, classify_web_text_value, collect_semantic_records,
+        collect_startup_deep_links_from, cursor_icon_for, downscale_rgba_box,
+        fission_key_down_event, focused_text_input_id, handle_fill_text_selector,
+        layout_size_to_image_dimensions, logical_viewport_to_physical_size,
+        logical_viewport_to_render_target_size, magnification_scale_factor, map_test_pointer_id,
+        map_test_pointer_kind, map_test_pointer_phase, map_test_scroll_delta_mode, map_touch_phase,
         native_window_size_for_logical_viewport, normalize_scale_factor,
         normalize_winit_scroll_delta, physical_position_to_layout_point,
         physical_size_to_layout_size, preferred_native_present_mode, preferred_surface_alpha_mode,
@@ -10282,6 +10328,43 @@ mod tests {
                 text: "e\u{301}".to_owned(),
             })
         );
+    }
+
+    #[test]
+    fn android_ime_commit_is_suppressed_once_after_matching_key_text() {
+        let now = std::time::Instant::now();
+        let mut pending = Some(("a".to_owned(), now));
+
+        assert!(android_ime_commit_duplicates_key_text(
+            &mut pending,
+            "a",
+            now
+        ));
+        assert!(pending.is_none());
+        assert!(!android_ime_commit_duplicates_key_text(
+            &mut pending,
+            "a",
+            now
+        ));
+    }
+
+    #[test]
+    fn android_ime_commit_is_not_suppressed_when_text_or_time_differs() {
+        let now = std::time::Instant::now();
+        let mut different = Some(("a".to_owned(), now));
+        assert!(!android_ime_commit_duplicates_key_text(
+            &mut different,
+            "b",
+            now
+        ));
+
+        let mut stale = Some((
+            "a".to_owned(),
+            now - super::ANDROID_KEY_IME_DEDUP_WINDOW - std::time::Duration::from_millis(1),
+        ));
+        assert!(!android_ime_commit_duplicates_key_text(
+            &mut stale, "a", now
+        ));
     }
     use serde::{Deserialize, Serialize};
     use std::cell::RefCell;
