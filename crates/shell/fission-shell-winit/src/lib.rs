@@ -3411,8 +3411,10 @@ fn fission_key_down_event(code: KeyCode, modifiers: u8, produced_text: Option<&s
     )
 }
 
+#[cfg(any(target_os = "android", test))]
 const ANDROID_KEY_IME_DEDUP_WINDOW: Duration = Duration::from_millis(250);
 
+#[cfg(any(target_os = "android", test))]
 fn android_ime_commit_duplicates_key_text(
     pending: &mut Option<(String, Instant)>,
     committed: &str,
